@@ -30,12 +30,25 @@ def create_clinical_summary(row):
     summary = f"Patient ID {row['subject_id']}, ICU length-of-stay {row['los']:.1f} days, average heart rate {row['avg_heart_rate']:.1f} bpm."
     return summary
 
-# Define a function to generate ground truth labels based on avg_heart_rate and los.
-def generate_ground_truth(row):
-    if row['avg_heart_rate'] > 100 or row['los'] > 4:
-        return "high risk"
-    else:
-        return "low risk"
+def label_readmission(icu_df):
+    readmit_flags = icu_df.groupby("subject_id")['stay_id'].transform('count') > 1
+    return readmit_flags.astype(int)
+
+def label_critical_intervention(inputevents, d_items):
+    critical_keywords = ["norepinephrine", "vasopressin", "epinephrine", "dopamine"]
+    critical_ids = d_items[d_items['label'].str.lower().isin(critical_keywords)]['itemid'].tolist()
+    critical_input = inputevents[inputevents['itemid'].isin(critical_ids)]
+    critical_flags = critical_input[['subject_id', 'stay_id']].drop_duplicates()
+    critical_flags['critical_intervention'] = 1
+    return critical_flags
+
+def label_procedures(procedureevents, d_items):
+    keywords = ["ventilation", "dialysis"]
+    proc_ids = d_items[d_items['label'].str.lower().str.contains('|'.join(keywords))]['itemid'].tolist()
+    proc_records = procedureevents[procedureevents['itemid'].isin(proc_ids)]
+    proc_flags = proc_records[['subject_id', 'stay_id']].drop_duplicates()
+    proc_flags['procedures'] = 1
+    return proc_flags
 
 # Data Loading & Preprocessing
 def load_or_generate_icu_summary():
@@ -49,6 +62,9 @@ def load_or_generate_icu_summary():
     chartevents = pd.read_csv('scratch/chartevents.csv.gz', low_memory=False, compression='gzip')
     icustays = pd.read_csv('scratch/icustays.csv.gz', compression='gzip')
     inputevents = pd.read_csv('scratch/inputevents.csv.gz', low_memory=False, compression='gzip')
+
+    # Load additional files
+    procedureevents = pd.read_csv('scratch/procedureevents.csv.gz', compression='gzip')
 
     # Initial Exploration
     print("Preview of caregiver table:")
@@ -120,8 +136,18 @@ def load_or_generate_icu_summary():
     # Generate a clinical summary for each ICU stay.
     icu_merged['clinical_summary'] = icu_merged.apply(create_clinical_summary, axis=1)
 
-    # 1.11 Generate ground truth labels
-    icu_merged['ground_truth'] = icu_merged.apply(generate_ground_truth, axis=1)
+    # Generate readmission labels
+    icu_merged['readmission'] = label_readmission(icu_merged)
+
+    # Generate critical intervention labels
+    critical_df = label_critical_intervention(inputevents, d_items)
+    icu_merged = pd.merge(icu_merged, critical_df, on=['subject_id', 'stay_id'], how='left')
+    icu_merged['critical_intervention'] = icu_merged['critical_intervention'].fillna(0).astype(int)
+
+    # Generate procedure-related labels
+    proc_df = label_procedures(procedureevents, d_items)
+    icu_merged = pd.merge(icu_merged, proc_df, on=['subject_id', 'stay_id'], how='left')
+    icu_merged['procedures'] = icu_merged['procedures'].fillna(0).astype(int)
 
     # Save the processed DataFrame to CSV
     icu_merged.to_csv("data/icu_summary.csv", index=False)
@@ -145,7 +171,7 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
         hr_match = re.search(r"average heart rate ([\d\.]+)", row['clinical_summary'])
         los = float(los_match.group(1)) if los_match else 0
         hr = float(hr_match.group(1)) if hr_match else 0
-        prompt = f"Input: {row['clinical_summary']}\nPrompt: The patient has an ICU stay of {los} days and an average heart rate of {hr} bpm.\nPrediction: {row['ground_truth']}\n"
+        prompt = f"Input: {row['clinical_summary']}\nPrompt: The patient has an ICU stay of {los} days and an average heart rate of {hr} bpm.\nPrediction: Readmission:{row['readmission']}\n Critical Intervention:{row['critical_intervention']}\n Ventilation or Dialysis Procedures:{row['procedures']}\n"
         few_shot_prompts.append(prompt)
 
     prompt_types_list = ["baseline", "cot_short", "cot_long", "cot_bad"]
@@ -153,7 +179,9 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
     print("====== ICL Experiment ======")
     for idx, row in test_set.iterrows():
         test_input = row['clinical_summary']
-        ground_truth = row['ground_truth']
+        ground_truth_readmission = row['readmission']
+        ground_truth_intervention = row['critical_intervention']
+        ground_truth_procedure = row['procedures']
         
         for num_shots in range(max_num_shots + 1):
             few_shot_prompt = '\n'.join(few_shot_prompts[:num_shots]) + '\n'
@@ -164,26 +192,45 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
                 print(f"Generated prompt ({prompt_type}):")
                 print(full_prompt)
                 prediction_text = call_gpt(full_prompt, max_tokens=1000)  # Using the imported GPT API call
-                if "Prediction:" in prediction_text:
-                    predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
+                if "Readmission:" in prediction_text:
+                    predicted_label_readmission = prediction_text.split("Readmission:")[-1].strip().split("\n")[0]
                 else:
-                    predicted_label = prediction_text.strip().split("\n")[0]
+                    predicted_label_readmission = prediction_text.strip().split("\n")[0]
+                if "Critical Intervention:" in prediction_text:
+                    predicted_label_intervention = prediction_text.split("Critical Intervention:")[-1].strip().split("\n")[0]
+                else:
+                    predicted_label_intervention = prediction_text.strip().split("\n")[0]
+                if "Ventilation or Dialysis Procedures:" in prediction_text:
+                    predicted_label_procedure = prediction_text.split("Ventilation or Dialysis Procedures:")[-1].strip().split("\n")[0]
+                else:
+                    predicted_label_procedure = prediction_text.strip().split("\n")[0]
+                predicted_label_readmission = int(predicted_label_readmission)
+                predicted_label_intervention = int(predicted_label_intervention)
+                predicted_label_procedure = int(predicted_label_procedure)
                 reasoning = ""
                 if "Reasoning:" in prediction_text:
                     reasoning = prediction_text.split("Reasoning:")[-1].strip().split("\n")[0]
-                accuracy = int(predicted_label == ground_truth)  # Calculate accuracy
+                accuracy_readmission = int(predicted_label_readmission == ground_truth_readmission)  # Calculate accuracy
+                accuracy_intervention = int(predicted_label_intervention == ground_truth_intervention)  # Calculate accuracy
+                accuracy_procedure = int(predicted_label_procedure == ground_truth_procedure)  # Calculate accuracy
                 results.append({
                     'stay_id': row['stay_id'],
                     'subject_id': row['subject_id'],
                     'clinical_summary': row['clinical_summary'],
-                    'ground_truth': ground_truth,
+                    'ground_truth_readmission': ground_truth_readmission,
+                    'ground_truth_intervention': ground_truth_intervention,
+                    'ground_truth_procedure': ground_truth_procedure,
                     'num_shots': num_shots,
-                    'predicted_label': predicted_label,
+                    'predicted_label_readmission': predicted_label_readmission,
+                    'predicted_label_intervention': predicted_label_intervention,
+                    'predicted_label_procedure': predicted_label_procedure,
                     'reasoning': reasoning,
-                    'accuracy': accuracy,
+                    'accuracy_readmission': accuracy_readmission,
+                    'accuracy_intervention': accuracy_intervention,
+                    'accuracy_procedure': accuracy_procedure,
                     'prompt_type': prompt_type
                 })
-                print(f"{prompt_type} Prediction:", predicted_label)
+                print(f"{prompt_type} Prediction:", predicted_label_readmission, predicted_label_intervention, predicted_label_procedure)
                 print("--------------------------------------------------\n")
 
     # Create a DataFrame to return with predictions and evaluations
