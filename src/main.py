@@ -128,44 +128,63 @@ def load_or_generate_icu_summary():
     return icu_merged
 
 
-def run_icl_experiment(icu_merged, n=1, repeats=3):
-    # For demonstration, randomly sample n ICU records and obtain their clinical summaries.
-    sampled_icu = icu_merged.sample(n=n, random_state=42).copy()
+def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
+    # For demonstration, randomly sample max_num_shots + n ICU records and obtain their clinical summaries.
+    sampled_icu = icu_merged.sample(n=max_num_shots + n, random_state=42).copy()
+    
+    # Split into test_set and support_set
+    test_set = sampled_icu.iloc[:n]
+    support_set = sampled_icu.iloc[n:max_num_shots + n]
 
     # Initialize lists to store prediction results and reasoning.
     results = []
 
+    few_shot_prompts = []
+    for _, row in support_set.iterrows():
+        los_match = re.search(r"ICU length-of-stay ([\d\.]+)", row['clinical_summary'])
+        hr_match = re.search(r"average heart rate ([\d\.]+)", row['clinical_summary'])
+        los = float(los_match.group(1)) if los_match else 0
+        hr = float(hr_match.group(1)) if hr_match else 0
+        prompt = f"Input: {row['clinical_summary']}\nPrompt: The patient has an ICU stay of {los} days and an average heart rate of {hr} bpm.\nPrediction: {row['ground_truth']}\n"
+        few_shot_prompts.append(prompt)
+
     prompt_types_list = ["baseline", "cot_short", "cot_long", "cot_bad"]
 
     print("====== ICL Experiment ======")
-    for idx, row in sampled_icu.iterrows():
+    for idx, row in test_set.iterrows():
         test_input = row['clinical_summary']
         ground_truth = row['ground_truth']
-        for prompt_type in prompt_types_list:
-            prompt = prompt_types[prompt_type](test_input)  # Using the imported prompt template
-            print(f"Generated prompt ({prompt_type}):")
-            print(prompt)
-            prediction_text = call_gpt(prompt, max_tokens=1000)  # Using the imported GPT API call
-            if "Prediction:" in prediction_text:
-                predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
-            else:
-                predicted_label = prediction_text.strip().split("\n")[0]
-            reasoning = ""
-            if "Reasoning:" in prediction_text:
-                reasoning = prediction_text.split("Reasoning:")[-1].strip().split("\n")[0]
-            accuracy = int(predicted_label == ground_truth)  # Calculate accuracy
-            results.append({
-                'stay_id': row['stay_id'],
-                'subject_id': row['subject_id'],
-                'clinical_summary': row['clinical_summary'],
-                'ground_truth': ground_truth,
-                'predicted_label': predicted_label,
-                'reasoning': reasoning,
-                'accuracy': accuracy,
-                'prompt_type': prompt_type
-            })
-            print(f"{prompt_type} Prediction:", predicted_label)
-            print("--------------------------------------------------\n")
+        
+        for num_shots in range(max_num_shots + 1):
+            few_shot_prompt = '\n'.join(few_shot_prompts[:num_shots]) + '\n'
+            
+            for prompt_type in prompt_types_list:
+                prompt = prompt_types[prompt_type](test_input)  # Using the imported prompt template
+                full_prompt = f"{few_shot_prompt}{prompt}"
+                print(f"Generated prompt ({prompt_type}):")
+                print(full_prompt)
+                prediction_text = call_gpt(full_prompt, max_tokens=1000)  # Using the imported GPT API call
+                if "Prediction:" in prediction_text:
+                    predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
+                else:
+                    predicted_label = prediction_text.strip().split("\n")[0]
+                reasoning = ""
+                if "Reasoning:" in prediction_text:
+                    reasoning = prediction_text.split("Reasoning:")[-1].strip().split("\n")[0]
+                accuracy = int(predicted_label == ground_truth)  # Calculate accuracy
+                results.append({
+                    'stay_id': row['stay_id'],
+                    'subject_id': row['subject_id'],
+                    'clinical_summary': row['clinical_summary'],
+                    'ground_truth': ground_truth,
+                    'num_shots': num_shots,
+                    'predicted_label': predicted_label,
+                    'reasoning': reasoning,
+                    'accuracy': accuracy,
+                    'prompt_type': prompt_type
+                })
+                print(f"{prompt_type} Prediction:", predicted_label)
+                print("--------------------------------------------------\n")
 
     # Create a DataFrame to return with predictions and evaluations
     results_df = pd.DataFrame(results)
