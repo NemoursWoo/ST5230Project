@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import precision_score, recall_score, f1_score
 import random
 import torch
 
@@ -153,14 +154,27 @@ def load_or_generate_icu_summary():
     icu_merged.to_csv("data/icu_summary.csv", index=False)
     return icu_merged
 
+def run_icl_experiment(icu_merged, n=500, max_num_shots=5):
+    # Ensure no overlap and at least one positive per label in support set
+    support_positive = pd.concat([
+        icu_merged[icu_merged['readmission'] == 1].sample(n=1, random_state=1),
+        icu_merged[icu_merged['critical_intervention'] == 1].sample(n=1, random_state=2),
+        icu_merged[icu_merged['procedures'] == 1].sample(n=1, random_state=3),
+    ])
 
-def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
-    # For demonstration, randomly sample max_num_shots + n ICU records and obtain their clinical summaries.
-    sampled_icu = icu_merged.sample(n=max_num_shots + n, random_state=42).copy()
-    
-    # Split into test_set and support_set
-    test_set = sampled_icu.iloc[:n]
-    support_set = sampled_icu.iloc[n:max_num_shots + n]
+    # Add more random negatives if needed to meet max_num_shots
+    remaining_needed = max_num_shots - len(support_positive)
+    if remaining_needed > 0:
+        negatives = icu_merged[
+            ~icu_merged['stay_id'].isin(support_positive['stay_id'])
+        ].sample(n=remaining_needed, random_state=4)
+        support_set = pd.concat([support_positive, negatives])
+    else:
+        support_set = support_positive
+
+    # Remove support set from icu_merged and sample test set from the rest
+    remaining_icu = icu_merged[~icu_merged['stay_id'].isin(support_set['stay_id'])]
+    test_set = remaining_icu.sample(n=n, random_state=5)
 
     # Initialize lists to store prediction results and reasoning.
     results = []
@@ -210,9 +224,14 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
                 reasoning = ""
                 if "Reasoning:" in prediction_text:
                     reasoning = prediction_text.split("Reasoning:")[-1].strip().split("\n")[0]
+
+                # Calculate accuracy
                 accuracy_readmission = int(predicted_label_readmission == ground_truth_readmission)  # Calculate accuracy
                 accuracy_intervention = int(predicted_label_intervention == ground_truth_intervention)  # Calculate accuracy
                 accuracy_procedure = int(predicted_label_procedure == ground_truth_procedure)  # Calculate accuracy
+
+
+                # Append all results including the new metrics
                 results.append({
                     'stay_id': row['stay_id'],
                     'subject_id': row['subject_id'],
@@ -221,10 +240,10 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
                     'ground_truth_intervention': ground_truth_intervention,
                     'ground_truth_procedure': ground_truth_procedure,
                     'num_shots': num_shots,
+                    'reasoning': reasoning,
                     'predicted_label_readmission': predicted_label_readmission,
                     'predicted_label_intervention': predicted_label_intervention,
                     'predicted_label_procedure': predicted_label_procedure,
-                    'reasoning': reasoning,
                     'accuracy_readmission': accuracy_readmission,
                     'accuracy_intervention': accuracy_intervention,
                     'accuracy_procedure': accuracy_procedure,
@@ -235,7 +254,53 @@ def run_icl_experiment(icu_merged, n=1, max_num_shots=5):
 
     # Create a DataFrame to return with predictions and evaluations
     results_df = pd.DataFrame(results)
-    return results_df
+
+    metrics = {}
+    for task in ['readmission', 'intervention', 'procedure']:
+        y_true = results_df[f'ground_truth_{task}']
+        y_pred = results_df[f'predicted_label_{task}']
+        metrics[f'{task}_precision'] = precision_score(y_true, y_pred, zero_division=0)
+        metrics[f'{task}_recall'] = recall_score(y_true, y_pred, zero_division=0)
+        metrics[f'{task}_f1'] = f1_score(y_true, y_pred, zero_division=0)
+
+    print("Evaluation metrics (batch):")
+    print(metrics)
+
+    grouped_metrics = {}
+    for prompt in results_df["prompt_type"].unique():
+        prompt_df = results_df[results_df["prompt_type"] == prompt]
+        for task in ['readmission', 'intervention', 'procedure']:
+            y_true = prompt_df[f'ground_truth_{task}']
+            y_pred = prompt_df[f'predicted_label_{task}']
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            grouped_metrics[f'{prompt}_{task}_precision'] = precision
+            grouped_metrics[f'{prompt}_{task}_recall'] = recall
+            grouped_metrics[f'{prompt}_{task}_f1'] = f1
+
+    for num_shots in sorted(results_df["num_shots"].unique()):
+        shot_df = results_df[results_df["num_shots"] == num_shots]
+        for task in ['readmission', 'intervention', 'procedure']:
+            y_true = shot_df[f'ground_truth_{task}']
+            y_pred = shot_df[f'predicted_label_{task}']
+            precision = precision_score(y_true, y_pred, zero_division=0)
+            recall = recall_score(y_true, y_pred, zero_division=0)
+            f1 = f1_score(y_true, y_pred, zero_division=0)
+            grouped_metrics[f'shots{num_shots}_{task}_precision'] = precision
+            grouped_metrics[f'shots{num_shots}_{task}_recall'] = recall
+            grouped_metrics[f'shots{num_shots}_{task}_f1'] = f1
+    print("Grouped evaluation metrics by prompt type:")
+    for k, v in grouped_metrics.items():
+        print(f"{k}: {v:.3f}")
+
+    # Save metrics to CSV
+    pd.DataFrame([metrics]).to_csv('results_metrics.csv', index=False)
+    
+    # Convert grouped_metrics dictionary to DataFrame and save
+    grouped_df = pd.DataFrame([grouped_metrics])
+    grouped_df.to_csv('results_grouped_metrics.csv', index=False)
+    return results_df, metrics, grouped_metrics
 
 def run_cot_analysis(sampled_df):
     # Implement consistency and rationality assessment of CoT outputs here.
@@ -261,5 +326,5 @@ def run_cot_analysis(sampled_df):
 icu_merged = load_or_generate_icu_summary()
 
 # Call the ICL experiment and CoT analysis functions
-sampled_df = run_icl_experiment(icu_merged)
+sampled_df, metrics, grouped_metrics = run_icl_experiment(icu_merged)
 run_cot_analysis(sampled_df)
