@@ -30,6 +30,13 @@ def create_clinical_summary(row):
     summary = f"Patient ID {row['subject_id']}, ICU length-of-stay {row['los']:.1f} days, average heart rate {row['avg_heart_rate']:.1f} bpm."
     return summary
 
+# Define a function to generate ground truth labels based on avg_heart_rate and los.
+def generate_ground_truth(row):
+    if row['avg_heart_rate'] > 100 or row['los'] > 4:
+        return "high risk"
+    else:
+        return "low risk"
+
 # Data Loading & Preprocessing
 def load_or_generate_icu_summary():
     # Check if the CSV file exists
@@ -86,7 +93,6 @@ def load_or_generate_icu_summary():
 
     # 1.7 Merge average heart rate with icustays data.
     icu_merged = pd.merge(icustays, heart_rate_grouped, on='stay_id', how='left')
-    icu_merged = icustays.merge(heart_rate_grouped, on='stay_id', how='left')
     icu_merged = icu_merged.dropna(subset=['avg_heart_rate'])
     print("\nMerged ICU stay records:")
     print(icu_merged[['stay_id', 'subject_id', 'intime', 'outtime', 'los', 'avg_heart_rate']].head())
@@ -114,74 +120,80 @@ def load_or_generate_icu_summary():
     # Generate a clinical summary for each ICU stay.
     icu_merged['clinical_summary'] = icu_merged.apply(create_clinical_summary, axis=1)
 
+    # 1.11 Generate ground truth labels
+    icu_merged['ground_truth'] = icu_merged.apply(generate_ground_truth, axis=1)
+
     # Save the processed DataFrame to CSV
     icu_merged.to_csv("data/icu_summary.csv", index=False)
     return icu_merged
 
-def run_icl_experiment(icu_merged):
-    # For demonstration, randomly sample 3 ICU records and obtain their clinical summaries.
-    sampled_icu = icu_merged.sample(n=3, random_state=42).copy()
 
-    # Initialize lists to store prediction results.
-    baseline_results = []
-    cot_results = []
+def run_icl_experiment(icu_merged, n=1, repeats=3):
+    # For demonstration, randomly sample n ICU records and obtain their clinical summaries.
+    sampled_icu = icu_merged.sample(n=n, random_state=42).copy()
 
-    print("====== Baseline ICL Experiment ======")
+    # Initialize lists to store prediction results and reasoning.
+    results = []
+
+    prompt_types_list = ["baseline", "cot_short", "cot_long", "cot_bad"]
+
+    print("====== ICL Experiment ======")
     for idx, row in sampled_icu.iterrows():
         test_input = row['clinical_summary']
-        prompt_baseline = prompt_types["baseline"](test_input)  # Using the imported prompt template
-        print("Generated prompt (Baseline):")
-        print(prompt_baseline)
-        prediction_text = call_gpt(prompt_baseline, max_tokens=100)  # Using the imported GPT API call
-        # Extract the prediction from the returned text (assumes the answer contains "Prediction:" followed by the result).
-        if "Prediction:" in prediction_text:
-            predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
-        else:
-            predicted_label = prediction_text.strip().split("\n")[0]
-        baseline_results.append(predicted_label)
-        print("Baseline Prediction:", predicted_label)
-        print("--------------------------------------------------\n")
+        ground_truth = row['ground_truth']
+        for prompt_type in prompt_types_list:
+            prompt = prompt_types[prompt_type](test_input)  # Using the imported prompt template
+            print(f"Generated prompt ({prompt_type}):")
+            print(prompt)
+            prediction_text = call_gpt(prompt, max_tokens=1000)  # Using the imported GPT API call
+            if "Prediction:" in prediction_text:
+                predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
+            else:
+                predicted_label = prediction_text.strip().split("\n")[0]
+            reasoning = ""
+            if "Reasoning:" in prediction_text:
+                reasoning = prediction_text.split("Reasoning:")[-1].strip().split("\n")[0]
+            accuracy = int(predicted_label == ground_truth)  # Calculate accuracy
+            results.append({
+                'stay_id': row['stay_id'],
+                'subject_id': row['subject_id'],
+                'clinical_summary': row['clinical_summary'],
+                'ground_truth': ground_truth,
+                'predicted_label': predicted_label,
+                'reasoning': reasoning,
+                'accuracy': accuracy,
+                'prompt_type': prompt_type
+            })
+            print(f"{prompt_type} Prediction:", predicted_label)
+            print("--------------------------------------------------\n")
 
-    print("====== CoT-enhanced ICL Experiment ======")
-    for idx, row in sampled_icu.iterrows():
-        test_input = row['clinical_summary']
-        prompt_cot = prompt_types["cot_short"](test_input)  # Using the imported prompt template
-        print("Generated prompt (CoT):")
-        print(prompt_cot)
-        prediction_text = call_gpt(prompt_cot, max_tokens=150)  # Using the imported GPT API call
-        if "Prediction:" in prediction_text:
-            predicted_label = prediction_text.split("Prediction:")[-1].strip().split("\n")[0]
-        else:
-            predicted_label = prediction_text.strip().split("\n")[0]
-        cot_results.append(predicted_label)
-        print("CoT Prediction:", predicted_label)
-        print("--------------------------------------------------\n")
+    # Create a DataFrame to return with predictions and evaluations
+    results_df = pd.DataFrame(results)
+    return results_df
 
-    # Save test samples and prediction results to a CSV for further analysis.
-    results_df = sampled_icu[['stay_id', 'subject_id', 'clinical_summary']].copy()
-    results_df['Baseline_Prediction'] = baseline_results
-    results_df['CoT_Prediction'] = cot_results
-    results_df.to_csv('icu_gpt4_cot_results.csv', index=False)
-    print("Experimental results have been saved to icu_gpt4_cot_results.csv")
-
-def run_cot_analysis(sampled_icu):
+def run_cot_analysis(sampled_df):
     # Implement consistency and rationality assessment of CoT outputs here.
-    # Placeholder for actual analysis logic.
-    analysis_results = {
-        'stay_id': sampled_icu['stay_id'],
-        'subject_id': sampled_icu['subject_id'],
-        'CoT_Prediction': sampled_icu['CoT_Prediction'],
-        'Consistency_Score': [1.0] * len(sampled_icu),  # Dummy consistency scores
-        'Rationality_Score': [1.0] * len(sampled_icu),  # Dummy rationality scores
-    }
-    analysis_df = pd.DataFrame(analysis_results)
-    analysis_df.to_csv('cot_analysis_results.csv', index=False)
+    # Score reasoning using GPT
+    scores = []
+    for reasoning in sampled_df['reasoning']:
+        score = call_gpt(f"Please evaluate the following clinical reasoning. Give **ONLY** numeric scores from 1 to 5 for each of the following: 1. Clarity: 2. Relevance: 3. Medical Soundness: \n\nReasoning: {reasoning}")  # Updated prompt for structured scoring
+        print(score)
+        clarity = re.search(r'Clarity:\s*(\d)', score)
+        relevance = re.search(r'Relevance:\s*(\d)', score)
+        medical_soundness = re.search(r'Medical Soundness:\s*(\d)', score)
+        clarity_score = int(clarity.group(1)) if clarity else None
+        relevance_score = int(relevance.group(1)) if relevance else None
+        medical_soundness_score = int(medical_soundness.group(1)) if medical_soundness else None
+        scores.append((clarity_score, relevance_score, medical_soundness_score))
+
+    # Add scores to DataFrame
+    sampled_df[['Clarity_Score', 'Relevance_Score', 'Medical_Soundness_Score']] = pd.DataFrame(scores, index=sampled_df.index)
+    sampled_df.to_csv('cot_analysis_results.csv', index=False)
     print("CoT analysis results have been saved to cot_analysis_results.csv")
 
 # Load or generate the ICU summary data
 icu_merged = load_or_generate_icu_summary()
 
 # Call the ICL experiment and CoT analysis functions
-run_icl_experiment(icu_merged)
-sampled_icu = icu_merged.sample(n=3, random_state=42).copy()
-run_cot_analysis(sampled_icu)
+sampled_df = run_icl_experiment(icu_merged)
+run_cot_analysis(sampled_df)
