@@ -5,7 +5,7 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 def call_gpt(prompt, max_tokens=100, temperature=0.7):
     response = client.chat.completions.create(
-        model="gpt-4o-mini",
+        model="gpt-4.1-mini",
         messages=[
             {"role": "user", "content": prompt}
         ],

@@ -154,7 +154,7 @@ def load_or_generate_icu_summary():
     icu_merged.to_csv("data/icu_summary.csv", index=False)
     return icu_merged
 
-def run_icl_experiment(icu_merged, n=500, max_num_shots=5):
+def run_icl_experiment(icu_merged, n=50, max_num_shots=5):
     # Ensure no overlap and at least one positive per label in support set
     support_positive = pd.concat([
         icu_merged[icu_merged['readmission'] == 1].sample(n=1, random_state=1),
@@ -189,6 +189,8 @@ def run_icl_experiment(icu_merged, n=500, max_num_shots=5):
         few_shot_prompts.append(prompt)
 
     prompt_types_list = ["baseline", "cot_short", "cot_long", "cot_bad"]
+
+    i = 0
 
     print("====== ICL Experiment ======")
     for idx, row in test_set.iterrows():
@@ -250,10 +252,14 @@ def run_icl_experiment(icu_merged, n=500, max_num_shots=5):
                     'prompt_type': prompt_type
                 })
                 print(f"{prompt_type} Prediction:", predicted_label_readmission, predicted_label_intervention, predicted_label_procedure)
+
                 print("--------------------------------------------------\n")
+            i+=1
+            print(i)
 
     # Create a DataFrame to return with predictions and evaluations
     results_df = pd.DataFrame(results)
+    results_df.to_csv('results.csv', index=False)
 
     metrics = {}
     for task in ['readmission', 'intervention', 'procedure']:
@@ -327,4 +333,4 @@ icu_merged = load_or_generate_icu_summary()
 
 # Call the ICL experiment and CoT analysis functions
 sampled_df, metrics, grouped_metrics = run_icl_experiment(icu_merged)
-run_cot_analysis(sampled_df)
+# run_cot_analysis(sampled_df)
