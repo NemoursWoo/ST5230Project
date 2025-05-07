@@ -1,0 +1,10 @@
+num_shots,task,prompt_pair,t_stat,p_value
+5,accuracy_readmission,baseline vs cot_short,0.5734623443633284,0.5689544686260503
+5,accuracy_readmission,cot_short vs cot_long,1.3527289154417448,0.1823516112397045
+5,accuracy_readmission,cot_long vs cot_bad,-1.4288690166235205,0.15938605197461633
+5,accuracy_intervention,baseline vs cot_short,0.0,1.0
+5,accuracy_intervention,cot_short vs cot_long,1.7685190342396897,0.08319896692938429
+5,accuracy_intervention,cot_long vs cot_bad,-2.5849213105659876,0.012768331605389047
+5,accuracy_procedure,baseline vs cot_short,-1.941450686788302,0.057965611536397864
+5,accuracy_procedure,cot_short vs cot_long,-0.9999999999999999,0.32222340595067556
+5,accuracy_procedure,cot_long vs cot_bad,1.0,0.32222340595067556
