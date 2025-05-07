@@ -154,7 +154,7 @@ def load_or_generate_icu_summary():
     icu_merged.to_csv("data/icu_summary.csv", index=False)
     return icu_merged
 
-def run_icl_experiment(icu_merged, n=50, max_num_shots=5):
+def run_icl_experiment(icu_merged, n=500, max_num_shots=5):
     # Ensure no overlap and at least one positive per label in support set
     support_positive = pd.concat([
         icu_merged[icu_merged['readmission'] == 1].sample(n=1, random_state=1),
